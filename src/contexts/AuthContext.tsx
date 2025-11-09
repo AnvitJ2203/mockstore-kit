@@ -1,4 +1,6 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from "react";
+import { supabase } from "@/integrations/supabase/client";
+import { User as SupabaseUser, Session } from "@supabase/supabase-js";
 
 interface User {
   id: string;
@@ -21,6 +23,8 @@ interface Address {
 
 interface AuthContextType {
   user: User | null;
+  session: Session | null;
+  loading: boolean;
   login: (email: string, password: string) => Promise<boolean>;
   signup: (email: string, password: string, name: string) => Promise<boolean>;
   logout: () => void;
@@ -34,105 +38,168 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const fetchUserData = async (userId: string) => {
+    const { data: userData } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", userId)
+      .single();
+
+    const { data: addresses } = await supabase
+      .from("addresses")
+      .select("*")
+      .eq("user_id", userId);
+
+    if (userData) {
+      setUser({
+        id: userData.id,
+        email: userData.email,
+        name: userData.full_name || "",
+        addresses: (addresses || []).map((addr) => ({
+          id: addr.id,
+          name: addr.label,
+          phone: "",
+          addressLine1: addr.full_address,
+          addressLine2: "",
+          city: addr.city || "",
+          state: addr.state || "",
+          pincode: addr.postal_code || "",
+          isDefault: addr.is_default || false,
+        })),
+      });
+    }
+  };
 
   useEffect(() => {
-    const storedUser = localStorage.getItem("user");
-    if (storedUser) {
-      setUser(JSON.parse(storedUser));
-    }
+    // Set up auth state listener
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      (event, session) => {
+        setSession(session);
+        if (session?.user) {
+          setTimeout(() => {
+            fetchUserData(session.user.id);
+          }, 0);
+        } else {
+          setUser(null);
+        }
+        setLoading(false);
+      }
+    );
+
+    // Check for existing session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      if (session?.user) {
+        fetchUserData(session.user.id);
+      }
+      setLoading(false);
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
   const login = async (email: string, password: string): Promise<boolean> => {
-    const users = JSON.parse(localStorage.getItem("users") || "[]");
-    const foundUser = users.find(
-      (u: any) => u.email === email && u.password === password
-    );
-
-    if (foundUser) {
-      const { password: _, ...userWithoutPassword } = foundUser;
-      setUser(userWithoutPassword);
-      localStorage.setItem("user", JSON.stringify(userWithoutPassword));
-      return true;
-    }
-    return false;
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+    return !error;
   };
 
   const signup = async (email: string, password: string, name: string): Promise<boolean> => {
-    const users = JSON.parse(localStorage.getItem("users") || "[]");
-    
-    if (users.find((u: any) => u.email === email)) {
-      return false;
-    }
-
-    const newUser = {
-      id: Date.now().toString(),
+    const { error } = await supabase.auth.signUp({
       email,
       password,
-      name,
-      addresses: [],
-    };
-
-    users.push(newUser);
-    localStorage.setItem("users", JSON.stringify(users));
-
-    const { password: _, ...userWithoutPassword } = newUser;
-    setUser(userWithoutPassword);
-    localStorage.setItem("user", JSON.stringify(userWithoutPassword));
-    return true;
+      options: {
+        emailRedirectTo: `${window.location.origin}/`,
+        data: {
+          full_name: name,
+        },
+      },
+    });
+    return !error;
   };
 
-  const logout = () => {
+  const logout = async () => {
+    await supabase.auth.signOut();
     setUser(null);
-    localStorage.removeItem("user");
+    setSession(null);
   };
 
-  const updateUser = (updates: Partial<User>) => {
+  const updateUser = async (updates: Partial<User>) => {
     if (!user) return;
     
-    const updatedUser = { ...user, ...updates };
-    setUser(updatedUser);
-    localStorage.setItem("user", JSON.stringify(updatedUser));
+    if (updates.name) {
+      await supabase
+        .from("users")
+        .update({ full_name: updates.name })
+        .eq("id", user.id);
+    }
 
-    const users = JSON.parse(localStorage.getItem("users") || "[]");
-    const userIndex = users.findIndex((u: any) => u.id === user.id);
-    if (userIndex !== -1) {
-      users[userIndex] = { ...users[userIndex], ...updates };
-      localStorage.setItem("users", JSON.stringify(users));
+    setUser({ ...user, ...updates });
+  };
+
+  const addAddress = async (address: Omit<Address, "id">) => {
+    if (!user) return;
+
+    const { data } = await supabase
+      .from("addresses")
+      .insert({
+        user_id: user.id,
+        label: address.name,
+        full_address: address.addressLine1,
+        city: address.city,
+        state: address.state,
+        postal_code: address.pincode,
+        is_default: address.isDefault,
+      })
+      .select()
+      .single();
+
+    if (data) {
+      await fetchUserData(user.id);
     }
   };
 
-  const addAddress = (address: Omit<Address, "id">) => {
+  const updateAddress = async (id: string, updates: Partial<Address>) => {
     if (!user) return;
 
-    const newAddress = {
-      ...address,
-      id: Date.now().toString(),
-    };
+    const updateData: any = {};
+    if (updates.name) updateData.label = updates.name;
+    if (updates.addressLine1) updateData.full_address = updates.addressLine1;
+    if (updates.city) updateData.city = updates.city;
+    if (updates.state) updateData.state = updates.state;
+    if (updates.pincode) updateData.postal_code = updates.pincode;
+    if (updates.isDefault !== undefined) updateData.is_default = updates.isDefault;
 
-    const updatedAddresses = [...user.addresses, newAddress];
-    updateUser({ addresses: updatedAddresses });
+    await supabase
+      .from("addresses")
+      .update(updateData)
+      .eq("id", id);
+
+    await fetchUserData(user.id);
   };
 
-  const updateAddress = (id: string, updates: Partial<Address>) => {
+  const deleteAddress = async (id: string) => {
     if (!user) return;
 
-    const updatedAddresses = user.addresses.map((addr) =>
-      addr.id === id ? { ...addr, ...updates } : addr
-    );
-    updateUser({ addresses: updatedAddresses });
-  };
+    await supabase
+      .from("addresses")
+      .delete()
+      .eq("id", id);
 
-  const deleteAddress = (id: string) => {
-    if (!user) return;
-
-    const updatedAddresses = user.addresses.filter((addr) => addr.id !== id);
-    updateUser({ addresses: updatedAddresses });
+    await fetchUserData(user.id);
   };
 
   return (
     <AuthContext.Provider
       value={{
         user,
+        session,
+        loading,
         login,
         signup,
         logout,

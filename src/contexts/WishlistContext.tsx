@@ -1,4 +1,6 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from "react";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "./AuthContext";
 
 export interface WishlistItem {
   id: string;
@@ -22,29 +24,76 @@ const WishlistContext = createContext<WishlistContextType | undefined>(undefined
 
 export const WishlistProvider = ({ children }: { children: ReactNode }) => {
   const [wishlist, setWishlist] = useState<WishlistItem[]>([]);
+  const { user } = useAuth();
 
-  useEffect(() => {
-    const storedWishlist = localStorage.getItem("wishlist");
-    if (storedWishlist) {
-      setWishlist(JSON.parse(storedWishlist));
+  const fetchWishlist = async () => {
+    if (!user) {
+      setWishlist([]);
+      return;
     }
-  }, []);
 
-  useEffect(() => {
-    localStorage.setItem("wishlist", JSON.stringify(wishlist));
-  }, [wishlist]);
+    const { data: wishlistItems } = await supabase
+      .from("wishlist")
+      .select(`
+        *,
+        products (
+          id,
+          name,
+          price,
+          image_url,
+          categories (name)
+        )
+      `)
+      .eq("user_id", user.id);
 
-  const addToWishlist = (item: WishlistItem) => {
-    setWishlist((prev) => {
-      if (prev.find((i) => i.id === item.id)) {
-        return prev;
-      }
-      return [...prev, item];
-    });
+    if (wishlistItems) {
+      setWishlist(
+        wishlistItems.map((item: any) => ({
+          id: item.products.id,
+          name: item.products.name,
+          price: parseFloat(item.products.price),
+          image: item.products.image_url || "/placeholder.svg",
+          category: item.products.categories?.name || "General",
+          rating: 4.5,
+          originalPrice: undefined,
+        }))
+      );
+    }
   };
 
-  const removeFromWishlist = (id: string) => {
-    setWishlist((prev) => prev.filter((item) => item.id !== id));
+  useEffect(() => {
+    fetchWishlist();
+  }, [user]);
+
+  const addToWishlist = async (item: WishlistItem) => {
+    if (!user) return;
+
+    const { data: existing } = await supabase
+      .from("wishlist")
+      .select("*")
+      .eq("user_id", user.id)
+      .eq("product_id", item.id)
+      .single();
+
+    if (!existing) {
+      await supabase.from("wishlist").insert({
+        user_id: user.id,
+        product_id: item.id,
+      });
+      await fetchWishlist();
+    }
+  };
+
+  const removeFromWishlist = async (id: string) => {
+    if (!user) return;
+
+    await supabase
+      .from("wishlist")
+      .delete()
+      .eq("user_id", user.id)
+      .eq("product_id", id);
+
+    await fetchWishlist();
   };
 
   const isInWishlist = (id: string) => {

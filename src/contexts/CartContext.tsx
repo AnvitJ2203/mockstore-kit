@@ -1,4 +1,6 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from "react";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "./AuthContext";
 
 export interface CartItem {
   id: string;
@@ -23,46 +25,110 @@ const CartContext = createContext<CartContextType | undefined>(undefined);
 
 export const CartProvider = ({ children }: { children: ReactNode }) => {
   const [cart, setCart] = useState<CartItem[]>([]);
+  const { user } = useAuth();
 
-  useEffect(() => {
-    const storedCart = localStorage.getItem("cart");
-    if (storedCart) {
-      setCart(JSON.parse(storedCart));
-    }
-  }, []);
-
-  useEffect(() => {
-    localStorage.setItem("cart", JSON.stringify(cart));
-  }, [cart]);
-
-  const addToCart = (item: Omit<CartItem, "quantity">) => {
-    setCart((prevCart) => {
-      const existingItem = prevCart.find((i) => i.id === item.id);
-      if (existingItem) {
-        return prevCart.map((i) =>
-          i.id === item.id ? { ...i, quantity: i.quantity + 1 } : i
-        );
-      }
-      return [...prevCart, { ...item, quantity: 1 }];
-    });
-  };
-
-  const removeFromCart = (id: string) => {
-    setCart((prevCart) => prevCart.filter((item) => item.id !== id));
-  };
-
-  const updateQuantity = (id: string, quantity: number) => {
-    if (quantity <= 0) {
-      removeFromCart(id);
+  const fetchCart = async () => {
+    if (!user) {
+      setCart([]);
       return;
     }
-    setCart((prevCart) =>
-      prevCart.map((item) => (item.id === id ? { ...item, quantity } : item))
-    );
+
+    const { data: cartItems } = await supabase
+      .from("cart_items")
+      .select(`
+        *,
+        products (
+          id,
+          name,
+          price,
+          image_url,
+          categories (name)
+        )
+      `)
+      .eq("user_id", user.id);
+
+    if (cartItems) {
+      setCart(
+        cartItems.map((item: any) => ({
+          id: item.products.id,
+          name: item.products.name,
+          price: parseFloat(item.products.price),
+          image: item.products.image_url || "/placeholder.svg",
+          quantity: item.quantity,
+          category: item.products.categories?.name || "General",
+        }))
+      );
+    }
   };
 
-  const clearCart = () => {
-    setCart([]);
+  useEffect(() => {
+    fetchCart();
+  }, [user]);
+
+  const addToCart = async (item: Omit<CartItem, "quantity">) => {
+    if (!user) return;
+
+    const { data: existing } = await supabase
+      .from("cart_items")
+      .select("*")
+      .eq("user_id", user.id)
+      .eq("product_id", item.id)
+      .single();
+
+    if (existing) {
+      await supabase
+        .from("cart_items")
+        .update({ quantity: existing.quantity + 1 })
+        .eq("id", existing.id);
+    } else {
+      await supabase.from("cart_items").insert({
+        user_id: user.id,
+        product_id: item.id,
+        quantity: 1,
+      });
+    }
+
+    await fetchCart();
+  };
+
+  const removeFromCart = async (id: string) => {
+    if (!user) return;
+
+    await supabase
+      .from("cart_items")
+      .delete()
+      .eq("user_id", user.id)
+      .eq("product_id", id);
+
+    await fetchCart();
+  };
+
+  const updateQuantity = async (id: string, quantity: number) => {
+    if (!user) return;
+
+    if (quantity <= 0) {
+      await removeFromCart(id);
+      return;
+    }
+
+    await supabase
+      .from("cart_items")
+      .update({ quantity })
+      .eq("user_id", user.id)
+      .eq("product_id", id);
+
+    await fetchCart();
+  };
+
+  const clearCart = async () => {
+    if (!user) return;
+
+    await supabase
+      .from("cart_items")
+      .delete()
+      .eq("user_id", user.id);
+
+    await fetchCart();
   };
 
   const cartTotal = cart.reduce(
